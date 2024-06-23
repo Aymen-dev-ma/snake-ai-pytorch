@@ -4,6 +4,7 @@ import numpy as np
 from collections import deque
 from game import SnakeGameAI, Direction, Point
 from model import Linear_QNet, QTrainer
+from causal_model import DynamicCausalQTrainer
 from helper import plot
 
 MAX_MEMORY = 100_000
@@ -18,7 +19,7 @@ class Agent:
         self.gamma = 0.9 # discount rate
         self.memory = deque(maxlen=MAX_MEMORY) # popleft()
         self.model = Linear_QNet(11, 256, 3)
-        self.trainer = QTrainer(self.model, lr=LR, gamma=self.gamma)
+        self.trainer = DynamicCausalQTrainer(self.model, lr=LR, gamma=self.gamma)
 
 
     def get_state(self, game):
