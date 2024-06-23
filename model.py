@@ -67,51 +67,59 @@ class QTrainer:
 
         self.optimizer.step()
 
-class DynamicCausalQTrainer(QTrainer):
-    def __init__(self, model, lr, gamma):
-        super().__init__(model, lr, gamma)
-        self.experience = []
-
-    def add_experience(self, state, action, reward, next_state, done):
-        self.experience.append((state, action, reward, next_state, done))
-
-    def estimate_causal_effect(self, state, action, reward, next_state):
-        return reward
-
-    def train_step(self, state, action, reward, next_state, done):
-        self.add_experience(state, action, reward, next_state, done)
-        state = torch.tensor(state, dtype=torch.float)
-        next_state = torch.tensor(next_state, dtype=torch.float)
-        action = torch.tensor(action, dtype=torch.long)
-        reward = torch.tensor(reward, dtype=torch.float)
-        if len(state.shape) == 1:
-            state = torch.unsqueeze(state, 0)
-            next_state = torch.unsqueeze(next_state, 0)
-            action = torch.unsqueeze(action, 0)
-            reward = torch.unsqueeze(reward, 0)
-            done = (done, )
-        pred = self.model(state)
-        target = pred.clone()
-        for idx in range(len(done)):
-            Q_new = reward[idx]
-            if not done[idx]:
-                causal_reward = self.estimate_causal_effect(state[idx].numpy(), action[idx].item(), reward[idx].item(), next_state[idx].numpy())
-                Q_new = causal_reward + self.gamma * torch.max(self.model(next_state[idx]))
-            target[idx][torch.argmax(action[idx]).item()] = Q_new
-        self.optimizer.zero_grad()
-        loss = self.criterion(target, pred)
-        loss.backward()
-        self.optimizer.step()
-
-model = Linear_QNet(input_size=4, hidden_size=256, output_size=2)
-trainer = DynamicCausalQTrainer(model, lr=0.001, gamma=0.9)
-state = [1, 0, 0, 1]
-action = [0, 1]
-reward = 1
-next_state = [0, 1, 0, 0]
-done = False
-trainer.train_step(state, action, reward, next_state, done)
 
 
+class ActorCritic(nn.Module):
+    def __init__(self, input_size, hidden_size, output_size):
+        super().__init__()
+        self.actor = Linear_QNet(input_size, hidden_size, output_size)
+        self.critic = Linear_QNet(input_size, hidden_size, 1)
+
+    def forward(self, x):
+        action_probs = F.softmax(self.actor(x), dim=-1)
+        state_value = self.critic(x)
+        return action_probs, state_value
+
+class PPOTrainer:
+    def __init__(self, model, lr, gamma, eps_clip):
+        self.model = model
+        self.gamma = gamma
+        self.eps_clip = eps_clip
+        self.optimizer = optim.Adam(model.parameters(), lr=lr)
+        self.criterion = nn.MSELoss()
+
+    def train_step(self, memory):
+        states = torch.tensor([m[0] for m in memory], dtype=torch.float)
+        actions = torch.tensor([m[1] for m in memory], dtype=torch.long)
+        rewards = torch.tensor([m[2] for m in memory], dtype=torch.float)
+        next_states = torch.tensor([m[3] for m in memory], dtype=torch.float)
+        dones = torch.tensor([m[4] for m in memory], dtype=torch.float)
+
+        old_probs, old_values = self.model(states)
+        old_probs = old_probs.gather(1, actions.unsqueeze(1)).squeeze(1)
+
+        returns = []
+        Gt = 0
+        for reward, done in zip(rewards[::-1], dones[::-1]):
+            Gt = reward + (self.gamma * Gt * (1 - done))
+            returns.insert(0, Gt)
+
+        returns = torch.tensor(returns, dtype=torch.float)
+        returns = (returns - returns.mean()) / (returns.std() + 1e-5)
+
+        for _ in range(10):  # Update policy 10 times per step
+            new_probs, new_values = self.model(states)
+            new_probs = new_probs.gather(1, actions.unsqueeze(1)).squeeze(1)
+
+            ratio = new_probs / old_probs
+            advantage = returns - old_values.detach().squeeze()
+
+            surr1 = ratio * advantage
+            surr2 = torch.clamp(ratio, 1 - self.eps_clip, 1 + self.eps_clip) * advantage
+            loss = -torch.min(surr1, surr2).mean() + 0.5 * self.criterion(new_values.squeeze(), returns) - 0.01 * (new_probs * torch.log(new_probs)).mean()
+
+            self.optimizer.zero_grad()
+            loss.backward()
+            self.optimizer.step()
 
 
