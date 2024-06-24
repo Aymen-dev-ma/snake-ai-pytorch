@@ -69,57 +69,136 @@ class QTrainer:
 
 
 
+
 class ActorCritic(nn.Module):
     def __init__(self, input_size, hidden_size, output_size):
-        super().__init__()
-        self.actor = Linear_QNet(input_size, hidden_size, output_size)
-        self.critic = Linear_QNet(input_size, hidden_size, 1)
+        super(ActorCritic, self).__init__()
+        self.actor = nn.Sequential(
+            nn.Linear(input_size, hidden_size),
+            nn.ReLU(),
+            nn.Linear(hidden_size, output_size),
+            nn.Softmax(dim=-1)
+        )
+        self.critic = nn.Sequential(
+            nn.Linear(input_size, hidden_size),
+            nn.ReLU(),
+            nn.Linear(hidden_size, 1)
+        )
 
     def forward(self, x):
-        action_probs = F.softmax(self.actor(x), dim=-1)
-        state_value = self.critic(x)
-        return action_probs, state_value
+        value = self.critic(x)
+        policy_dist = self.actor(x)
+        return value, policy_dist
 
-class PPOTrainer:
-    def __init__(self, model, lr, gamma, eps_clip):
+    def save(self, file_name='actor_critic_model.pth'):
+        model_folder_path = './model'
+        if not os.path.exists(model_folder_path):
+            os.makedirs(model_folder_path)
+
+        file_name = os.path.join(model_folder_path, file_name)
+        torch.save(self.state_dict(), file_name)
+
+class ActorCriticTrainer:
+    def __init__(self, model, lr):
         self.model = model
-        self.gamma = gamma
-        self.eps_clip = eps_clip
         self.optimizer = optim.Adam(model.parameters(), lr=lr)
         self.criterion = nn.MSELoss()
 
-    def train_step(self, memory):
-        states = torch.tensor([m[0] for m in memory], dtype=torch.float)
-        actions = torch.tensor([m[1] for m in memory], dtype=torch.long)
-        rewards = torch.tensor([m[2] for m in memory], dtype=torch.float)
-        next_states = torch.tensor([m[3] for m in memory], dtype=torch.float)
-        dones = torch.tensor([m[4] for m in memory], dtype=torch.float)
+    def train_step(self, state, action, reward, next_state, done):
+        state = torch.tensor(state, dtype=torch.float)
+        next_state = torch.tensor(next_state, dtype=torch.float)
+        action = torch.tensor(action, dtype=torch.long)
+        reward = torch.tensor(reward, dtype=torch.float)
+        
+        if len(state.shape) == 1:
+            state = torch.unsqueeze(state, 0)
+            next_state = torch.unsqueeze(next_state, 0)
+            action = torch.unsqueeze(action, 0)
+            reward = torch.unsqueeze(reward, 0)
+            done = (done, )
 
-        old_probs, old_values = self.model(states)
-        old_probs = old_probs.gather(1, actions.unsqueeze(1)).squeeze(1)
+        value, policy_dist = self.model(state)
+        _, next_value = self.model(next_state)
+        
+        advantage = reward + (1 - torch.tensor(done, dtype=torch.float)) * next_value - value
+        
+        critic_loss = advantage.pow(2).mean()
+        actor_loss = -(torch.log(policy_dist.gather(1, action.unsqueeze(-1))) * advantage.detach()).mean()
+        
+        loss = actor_loss + critic_loss
 
-        returns = []
-        Gt = 0
-        for reward, done in zip(rewards[::-1], dones[::-1]):
-            Gt = reward + (self.gamma * Gt * (1 - done))
-            returns.insert(0, Gt)
+        self.optimizer.zero_grad()
+        loss.backward()
+        self.optimizer.step()
 
-        returns = torch.tensor(returns, dtype=torch.float)
-        returns = (returns - returns.mean()) / (returns.std() + 1e-5)
+class PPO(nn.Module):
+    def __init__(self, input_size, hidden_size, output_size):
+        super(PPO, self).__init__()
+        self.actor = nn.Sequential(
+            nn.Linear(input_size, hidden_size),
+            nn.ReLU(),
+            nn.Linear(hidden_size, output_size),
+            nn.Softmax(dim=-1)
+        )
+        self.critic = nn.Sequential(
+            nn.Linear(input_size, hidden_size),
+            nn.ReLU(),
+            nn.Linear(hidden_size, 1)
+        )
 
-        for _ in range(10):  # Update policy 10 times per step
-            new_probs, new_values = self.model(states)
-            new_probs = new_probs.gather(1, actions.unsqueeze(1)).squeeze(1)
+    def forward(self, x):
+        value = self.critic(x)
+        policy_dist = self.actor(x)
+        return value, policy_dist
 
-            ratio = new_probs / old_probs
-            advantage = returns - old_values.detach().squeeze()
+    def save(self, file_name='ppo_model.pth'):
+        model_folder_path = './model'
+        if not os.path.exists(model_folder_path):
+            os.makedirs(model_folder_path)
+
+        file_name = os.path.join(model_folder_path, file_name)
+        torch.save(self.state_dict(), file_name)
+
+class PPOTrainer:
+    def __init__(self, model, lr, gamma, eps_clip, K_epochs):
+        self.model = model
+        self.optimizer = optim.Adam(model.parameters(), lr=lr)
+        self.gamma = gamma
+        self.eps_clip = eps_clip
+        self.K_epochs = K_epochs
+        self.criterion = nn.MSELoss()
+
+    def train_step(self, state, action, reward, next_state, done, old_log_probs):
+        state = torch.tensor(state, dtype=torch.float)
+        next_state = torch.tensor(next_state, dtype=torch.float)
+        action = torch.tensor(action, dtype=torch.long)
+        reward = torch.tensor(reward, dtype=torch.float)
+        old_log_probs = torch.tensor(old_log_probs, dtype=torch.float)
+        
+        if len(state.shape) == 1:
+            state = torch.unsqueeze(state, 0)
+            next_state = torch.unsqueeze(next_state, 0)
+            action = torch.unsqueeze(action, 0)
+            reward = torch.unsqueeze(reward, 0)
+            done = (done, )
+
+        for _ in range(self.K_epochs):
+            value, policy_dist = self.model(state)
+            _, next_value = self.model(next_state)
+            
+            advantage = reward + (1 - torch.tensor(done, dtype=torch.float)) * self.gamma * next_value - value
+            advantage = advantage.detach()
+            
+            new_log_probs = torch.log(policy_dist.gather(1, action.unsqueeze(-1)))
+            ratio = torch.exp(new_log_probs - old_log_probs)
 
             surr1 = ratio * advantage
             surr2 = torch.clamp(ratio, 1 - self.eps_clip, 1 + self.eps_clip) * advantage
-            loss = -torch.min(surr1, surr2).mean() + 0.5 * self.criterion(new_values.squeeze(), returns) - 0.01 * (new_probs * torch.log(new_probs)).mean()
+            actor_loss = -torch.min(surr1, surr2).mean()
+            critic_loss = self.criterion(value, reward + (1 - torch.tensor(done, dtype=torch.float)) * self.gamma * next_value.detach())
+
+            loss = 0.5 * critic_loss + actor_loss
 
             self.optimizer.zero_grad()
             loss.backward()
             self.optimizer.step()
-
-
