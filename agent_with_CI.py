@@ -1,16 +1,32 @@
-# Snake Game AI using Q-Learning with Causal Inference
+import torch
 import random
 import numpy as np
-import torch
 from collections import deque
 from game import SnakeGameAI, Direction, Point
-def get_state(self, game):
+from model import ActorCritic, ActorCriticTrainer
+from helper import plot
+
+MAX_MEMORY = 100_000
+BATCH_SIZE = 1000
+LR = 0.01
+
+class Agent:
+
+    def __init__(self):
+        self.n_games = 0
+        self.epsilon = 0  # randomness
+        self.gamma = 0.5  # discount rate
+        self.memory = deque(maxlen=MAX_MEMORY)  # popleft()
+        self.model = ActorCritic(11, 256, 3)
+        self.trainer = ActorCriticTrainer(self.model, lr=LR)
+
+    def get_state(self, game):
         head = game.snake[0]
         point_l = Point(head.x - 20, head.y)
         point_r = Point(head.x + 20, head.y)
         point_u = Point(head.x, head.y - 20)
         point_d = Point(head.x, head.y + 20)
-        
+
         dir_l = game.direction == Direction.LEFT
         dir_r = game.direction == Direction.RIGHT
         dir_u = game.direction == Direction.UP
@@ -34,119 +50,88 @@ def get_state(self, game):
             (dir_u and game.is_collision(point_l)) or 
             (dir_r and game.is_collision(point_u)) or 
             (dir_l and game.is_collision(point_d)),
-            
+
             # Move direction
             dir_l,
             dir_r,
             dir_u,
             dir_d,
-            
+
             # Food location 
             game.food.x < game.head.x,  # food left
             game.food.x > game.head.x,  # food right
             game.food.y < game.head.y,  # food up
             game.food.y > game.head.y  # food down
-            ]
+        ]
 
         return np.array(state, dtype=int)
 
-def counterfactual(state, action, outcome, game):
-    head = game.snake[0]
-    point_l = Point(head.x - 20, head.y)
-    point_r = Point(head.x + 20, head.y)
-    point_u = Point(head.x, head.y - 20)
-    point_d = Point(head.x, head.y + 20)
-    
-    food_left = game.food.x < head.x
-    food_right = game.food.x > head.x
-    food_up = game.food.y < head.y
-    food_down = game.food.y > head.y
-    
-    dir_l = game.direction == Direction.LEFT
-    dir_r = game.direction == Direction.RIGHT
-    dir_u = game.direction == Direction.UP
-    dir_d = game.direction == Direction.DOWN
+    def remember(self, state, action, reward, next_state, done):
+        self.memory.append((state, action, reward, next_state, done))  # popleft if MAX_MEMORY is reached
 
-    variables = {
-        "goal": False,
-        "danger": False,
-        "direction": False
-    }
-    
-    # Check for food
-    if (action == 0 and food_left) or (action == 1 and food_right) or (action == 2 and food_up) or (action == 3 and food_down):
-        variables["goal"] = True
-    
-    # Check for danger
-    if (action == 0 and game.is_collision(point_l)) or (action == 1 and game.is_collision(point_r)) or (action == 2 and game.is_collision(point_u)) or (action == 3 and game.is_collision(point_d)):
-        variables["danger"] = True
-    
-    # Check for safe direction
-    if not variables["danger"]:
-        variables["direction"] = True
-    
-    return variables[outcome]
+    def train_long_memory(self):
+        if len(self.memory) > BATCH_SIZE:
+            mini_sample = random.sample(self.memory, BATCH_SIZE)  # list of tuples
+        else:
+            mini_sample = self.memory
 
-class QLearningCausal:
-    def __init__(self, game, episodes=1000, alpha=0.1, gamma=0.9, epsilon=0.1):
-        self.game = game
-        self.episodes = episodes
-        self.alpha = alpha
-        self.gamma = gamma
-        self.epsilon = epsilon
-        self.Q = {}
-    
-    def get_current_value(self):
-        return self.epsilon
-    
-    def epsilon_greedy(self, state):
-        eps = np.random.uniform()
-        if eps > self.get_current_value():
-            return np.argmax(self.Q.get(state, [0, 0, 0, 0]))
-        
-        if counterfactual(state, 0, "goal", self.game):
-            return 0
-        if counterfactual(state, 1, "goal", self.game):
-            return 1
-        if counterfactual(state, 2, "goal", self.game):
-            return 2
-        if counterfactual(state, 3, "goal", self.game):
-            return 3
-        
-        safe_actions = [a for a in range(4) if counterfactual(state, a, "direction", self.game)]
-        if safe_actions:
-            return np.random.choice(safe_actions)
-        
-        return np.random.choice(4)
-    
-    def train(self):
-        for episode in range(self.episodes):
-            self.game.reset()
-            state = tuple(self.game.get_state())
-            done = False
-            while not done:
-                action = self.epsilon_greedy(state)
-                reward, done, score = self.game.play_step(action)
-                new_state = tuple(self.game.get_state())
-                best_next_action = np.argmax(self.Q.get(new_state, [0, 0, 0, 0]))
-                self.Q[state][action] = self.Q.get(state, [0, 0, 0, 0])[action] + self.alpha * (reward + self.gamma * self.Q.get(new_state, [0, 0, 0, 0])[best_next_action] - self.Q.get(state, [0, 0, 0, 0])[action])
-                state = new_state
+        states, actions, rewards, next_states, dones = zip(*mini_sample)
+        self.trainer.train_step(states, actions, rewards, next_states, dones)
 
-    def test(self):
-        self.game.reset()
-        state = tuple(self.game.get_state())
-        done = False
-        while not done:
-            action = np.argmax(self.Q.get(state, [0, 0, 0, 0]))
-            _, done, _ = self.game.play_step(action)
-            state = tuple(self.game.get_state())
+    def train_short_memory(self, state, action, reward, next_state, done):
+        self.trainer.train_step([state], [action], [reward], [next_state], [done])
 
-def main():
+    def get_action(self, state):
+        state = torch.tensor(state, dtype=torch.float)
+        _, policy_dist = self.model(state)
+        policy_dist = policy_dist.detach().numpy()
+        action = np.random.choice(len(policy_dist), p=policy_dist)
+        final_move = [0, 0, 0]
+        final_move[action] = 1
+        return final_move
+
+def train():
+    plot_scores = []
+    plot_mean_scores = []
+    total_score = 0
+    record = 0
+    agent = Agent()
     game = SnakeGameAI()
-    episodes = 1000
-    q_learning_causal = QLearningCausal(game, episodes=episodes)
-    q_learning_causal.train()
-    q_learning_causal.test()
+    while True:
+        # get old state
+        state_old = agent.get_state(game)
+
+        # get move
+        final_move = agent.get_action(state_old)
+
+        # perform move and get new state
+        reward, done, score = game.play_step(final_move)
+        state_new = agent.get_state(game)
+
+        # train short memory
+        agent.train_short_memory(state_old, final_move, reward, state_new, done)
+
+        # remember
+        agent.remember(state_old, final_move, reward, state_new, done)
+
+        if done:
+            # train long memory, plot result
+            game.reset()
+            agent.n_games += 1
+            agent.train_long_memory()
+
+            if score > record:
+                record = score
+                agent.model.save()
+
+            print('Game', agent.n_games, 'Score', score, 'Record:', record)
+
+            plot_scores.append(score)
+            total_score += score
+            mean_score = total_score / agent.n_games
+            plot_mean_scores.append(mean_score)
+            plot(plot_scores, plot_mean_scores)
+
 
 if __name__ == '__main__':
-    main()
+    train()
