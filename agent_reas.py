@@ -19,25 +19,27 @@ class Agent:
         self.epsilon = 1.0  # Initial randomness
         self.gamma = 0.9  # Discount rate
         self.memory = deque(maxlen=MAX_MEMORY)  # popleft()
-        self.model = Linear_QNet(11, 256, 3)  # State size of 11
+        self.model = Linear_QNet(17, 256, 3)  # Updated state size of 17
         self.trainer = QTrainer(self.model, lr=LR, gamma=self.gamma)
         self.fig, self.ax = plt.subplots(figsize=(8, 6))
         self.causal_graph = self.build_causal_graph()
         self.pos = nx.spring_layout(self.causal_graph)
         self.visualize_causal_graph()
+        self.visited_states = set()  # Track visited states for curiosity-driven exploration
 
     def build_causal_graph(self):
         G = nx.DiGraph()
         G.add_edges_from([
-            ('Obstacle Proximity', 'Action'),
+            ('State', 'Action'),
             ('Action', 'Outcome'),
-            ('Obstacle Proximity', 'Outcome')
+            ('State', 'Outcome')
         ])
         return G
 
     def visualize_causal_graph(self):
+        self.ax.clear()
         nx.draw(self.causal_graph, self.pos, with_labels=True, ax=self.ax, node_size=3000, node_color="skyblue", font_size=12, font_weight="bold", arrows=True)
-        plt.title("Causal Graph with Backdoor Adjustment")
+        plt.title("Causal Graph with Counterfactual Reasoning and Curiosity")
         plt.draw()
         plt.pause(0.001)  # Pause to update the plot
 
@@ -82,7 +84,17 @@ class Agent:
             game.food.x < game.head.x,  # food left
             game.food.x > game.head.x,  # food right
             game.food.y < game.head.y,  # food up
-            game.food.y > game.head.y  # food down
+            game.food.y > game.head.y,  # food down
+
+            # Obstacle proximity
+            min(game.head.x, game.w - game.head.x),  # distance to left/right wall
+            min(game.head.y, game.h - game.head.y),  # distance to top/bottom wall
+
+            # Tail proximity
+            game.snake[1].x < game.head.x,  # tail left
+            game.snake[1].x > game.head.x,  # tail right
+            game.snake[1].y < game.head.y,  # tail up
+            game.snake[1].y > game.head.y  # tail down
         ]
 
         return np.array(state, dtype=int)
@@ -102,52 +114,132 @@ class Agent:
     def train_short_memory(self, state, action, reward, next_state, done):
         self.trainer.train_step(state, action, reward, next_state, done)
 
-    def backdoor_adjustment(self, state):
+    def calculate_propensity_scores(self, state):
         """
-        Backdoor adjustment to add reasoning based on obstacle proximity.
+        Calculate the propensity scores for each action based on the state.
         """
-        obstacle_proximity = [state[-2], state[-1]]  # Last two elements in state represent obstacle proximity
-        # Use the backdoor adjustment to influence action choices
-        # For example, if the agent is close to an obstacle, it should avoid it
-        if obstacle_proximity[0] < 20 or obstacle_proximity[1] < 20:
-            return -1  # High risk, avoid this action
-        return 0  # Safe action
+        state_tensor = torch.tensor(state, dtype=torch.float)
+        with torch.no_grad():
+            probabilities = torch.softmax(self.model(state_tensor), dim=0)
+        return probabilities.numpy()
+
+    def counterfactual_reasoning(self, state):
+        """
+        Use counterfactual reasoning to evaluate potential actions.
+        """
+        potential_rewards = []
+        for action in range(3):
+            next_state = self.simulate_action(state, action)
+            propensity = self.calculate_propensity_scores(state)[action]
+            potential_rewards.append(self.evaluate_state(next_state) * (1 / propensity))
+        return potential_rewards
+
+    def simulate_action(self, state, action):
+        """
+        Simulate the next state given the current state and action.
+        """
+        simulated_state = state.copy()
+        # Simulate the action by updating the state accordingly
+        if action == 0:  # Move straight
+            if simulated_state[4]:  # Moving left
+                simulated_state[0] = simulated_state[1] = simulated_state[2] = 0
+                simulated_state[3] = 1
+            elif simulated_state[5]:  # Moving right
+                simulated_state[0] = simulated_state[1] = simulated_state[2] = 0
+                simulated_state[3] = 1
+            elif simulated_state[6]:  # Moving up
+                simulated_state[0] = simulated_state[1] = simulated_state[2] = 0
+                simulated_state[3] = 1
+            elif simulated_state[7]:  # Moving down
+                simulated_state[0] = simulated_state[1] = simulated_state[2] = 0
+                simulated_state[3] = 1
+        elif action == 1:  # Move right
+            if simulated_state[4]:  # Moving left
+                simulated_state[4] = simulated_state[6] = simulated_state[7] = 0
+                simulated_state[5] = 1
+            elif simulated_state[5]:  # Moving right
+                simulated_state[4] = simulated_state[6] = simulated_state[7] = 0
+                simulated_state[5] = 1
+            elif simulated_state[6]:  # Moving up
+                simulated_state[4] = simulated_state[5] = simulated_state[7] = 0
+                simulated_state[6] = 1
+            elif simulated_state[7]:  # Moving down
+                simulated_state[4] = simulated_state[5] = simulated_state[6] = 0
+                simulated_state[7] = 1
+        elif action == 2:  # Move left
+            if simulated_state[4]:  # Moving left
+                simulated_state[4] = simulated_state[5] = simulated_state[6] = 0
+                simulated_state[7] = 1
+            elif simulated_state[5]:  # Moving right
+                simulated_state[4] = simulated_state[5] = simulated_state[6] = 0
+                simulated_state[7] = 1
+            elif simulated_state[6]:  # Moving up
+                simulated_state[4] = simulated_state[5] = simulated_state[7] = 0
+                simulated_state[6] = 1
+            elif simulated_state[7]:  # Moving down
+                simulated_state[4] = simulated_state[5] = simulated_state[7] = 0
+                simulated_state[6] = 1
+        return simulated_state
+
+    def evaluate_state(self, state):
+        """
+        Evaluate the potential reward of a given state.
+        """
+        # Example evaluation: Reward based on the proximity to food
+        food_distance = np.abs(state[7] - state[11]) + np.abs(state[8] - state[12])
+        return -food_distance
 
     def get_action(self, state):
         # random moves: tradeoff exploration / exploitation
-        self.epsilon = max(0.01, self.epsilon - 0.001)  # Decrease epsilon over time
+        self.epsilon = max(0.01, self.epsilon * 0.995)  # Decrease epsilon over time
         final_move = [0, 0, 0]
+        move = 0
 
         if random.uniform(0, 1) < self.epsilon:
             move = random.randint(0, 2)
         else:
-            state_tensor = torch.tensor(state, dtype=torch.float)
-            prediction = self.model(state_tensor)
-            move = torch.argmax(prediction).item()
-
-        causal_adjustment = self.backdoor_adjustment(state)
-        if causal_adjustment == -1:
-            move = (move + 1) % 3  # Change action to avoid obstacle
+            potential_rewards = self.counterfactual_reasoning(state)
+            move = np.argmax(potential_rewards)
 
         final_move[move] = 1
         return final_move
 
-    def reward_shaping(self, reward, state_old, state_new):
+    def reward_shaping(self, reward, state_old, state_new, action):
         """
         Modify the reward to encourage exploration and prevent turning on itself.
         """
+        # Calculate propensity scores
+        propensities = self.calculate_propensity_scores(state_old)
+
+        # Use the inverse of the propensity score as a weight
+        weight = 1 / propensities[action]
+
         # Penalize for not moving towards food
         if np.array_equal(state_old[7:11], state_new[7:11]):
-            reward -= 0.2
+            reward -= 2.0  # Higher penalty for not moving towards food
 
         # Penalize for turning on itself
         if np.array_equal(state_old[:4], state_new[:4]):
-            reward -= 0.2
+            reward -= 2.0  # Higher penalty for repetitive movements
+
+        # Penalize for moving away from food
+        if (state_old[7] and state_new[8]) or (state_old[8] and state_new[7]) or \
+           (state_old[9] and state_new[10]) or (state_old[10] and state_new[9]):
+            reward -= 1.0
 
         # Additional shaping for moving towards food
         if (state_new[7] and not state_old[7]) or (state_new[8] and not state_old[8]) or \
            (state_new[9] and not state_old[9]) or (state_new[10] and not state_old[10]):
-            reward += 0.5
+            reward += 2.0  # Higher reward for moving towards food
+
+        # Apply the weight to the reward
+        reward *= weight
+
+        # Curiosity-driven exploration: reward for visiting new states
+        state_tuple = tuple(state_new)
+        if state_tuple not in self.visited_states:
+            reward += 1.0
+            self.visited_states.add(state_tuple)
 
         return reward
 
@@ -165,13 +257,14 @@ def train():
 
         # get move
         final_move = agent.get_action(state_old)
+        action = np.argmax(final_move)
 
         # perform move and get new state
         reward, done, score = game.play_step(final_move)
         state_new = agent.get_state(game)
 
         # reward shaping
-        reward = agent.reward_shaping(reward, state_old, state_new)
+        reward = agent.reward_shaping(reward, state_old, state_new, action)
 
         # train short memory
         agent.train_short_memory(state_old, final_move, reward, state_new, done)

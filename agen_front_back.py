@@ -19,7 +19,7 @@ class Agent:
         self.epsilon = 1.0  # Initial randomness
         self.gamma = 0.9  # Discount rate
         self.memory = deque(maxlen=MAX_MEMORY)  # popleft()
-        self.model = Linear_QNet(11, 256, 3)  # State size of 11
+        self.model = Linear_QNet(13, 256, 3)  # 13 input size to include obstacle proximity
         self.trainer = QTrainer(self.model, lr=LR, gamma=self.gamma)
         self.fig, self.ax = plt.subplots(figsize=(8, 6))
         self.causal_graph = self.build_causal_graph()
@@ -36,8 +36,9 @@ class Agent:
         return G
 
     def visualize_causal_graph(self):
+        self.ax.clear()
         nx.draw(self.causal_graph, self.pos, with_labels=True, ax=self.ax, node_size=3000, node_color="skyblue", font_size=12, font_weight="bold", arrows=True)
-        plt.title("Causal Graph with Backdoor Adjustment")
+        plt.title("Causal Graph with Combined Front-Door and Backdoor Adjustment")
         plt.draw()
         plt.pause(0.001)  # Pause to update the plot
 
@@ -82,7 +83,11 @@ class Agent:
             game.food.x < game.head.x,  # food left
             game.food.x > game.head.x,  # food right
             game.food.y < game.head.y,  # food up
-            game.food.y > game.head.y  # food down
+            game.food.y > game.head.y,  # food down
+
+            # Obstacle proximity
+            min(game.head.x, game.w - game.head.x),  # distance to left/right wall
+            min(game.head.y, game.h - game.head.y)  # distance to top/bottom wall
         ]
 
         return np.array(state, dtype=int)
@@ -102,20 +107,36 @@ class Agent:
     def train_short_memory(self, state, action, reward, next_state, done):
         self.trainer.train_step(state, action, reward, next_state, done)
 
-    def backdoor_adjustment(self, state):
+    def frontdoor_adjustment(self, state, action):
         """
-        Backdoor adjustment to add reasoning based on obstacle proximity.
+        Front-door adjustment to calculate the causal effect of action on outcome through an intermediary.
         """
-        obstacle_proximity = [state[-2], state[-1]]  # Last two elements in state represent obstacle proximity
-        # Use the backdoor adjustment to influence action choices
-        # For example, if the agent is close to an obstacle, it should avoid it
-        if obstacle_proximity[0] < 20 or obstacle_proximity[1] < 20:
-            return -1  # High risk, avoid this action
-        return 0  # Safe action
+        # Example: Consider the impact of moving towards food directly
+        food_direction = state[7:11]
+        if action == 0 and food_direction[1]:  # Move right if food is right
+            return 1
+        elif action == 1 and food_direction[3]:  # Move up if food is up
+            return 1
+        elif action == 2 and food_direction[0]:  # Move left if food is left
+            return 1
+        elif action == 3 and food_direction[2]:  # Move down if food is down
+            return 1
+        return 0
+
+    def backdoor_adjustment(self, state, action):
+        """
+        Backdoor adjustment to calculate the causal effect of action on outcome.
+        """
+        obstacle_proximity = state[-2:]
+
+        # Calculate the causal effect using the backdoor adjustment formula
+        causal_effect = -np.sum(obstacle_proximity)  # Negative sum to represent risk
+
+        return causal_effect
 
     def get_action(self, state):
         # random moves: tradeoff exploration / exploitation
-        self.epsilon = max(0.01, self.epsilon - 0.001)  # Decrease epsilon over time
+        self.epsilon = max(0.01, self.epsilon * 0.995)  # Decrease epsilon over time
         final_move = [0, 0, 0]
 
         if random.uniform(0, 1) < self.epsilon:
@@ -125,9 +146,12 @@ class Agent:
             prediction = self.model(state_tensor)
             move = torch.argmax(prediction).item()
 
-        causal_adjustment = self.backdoor_adjustment(state)
-        if causal_adjustment == -1:
-            move = (move + 1) % 3  # Change action to avoid obstacle
+        # Combine front-door and backdoor adjustments
+        frontdoor_effect = self.frontdoor_adjustment(state, move)
+        backdoor_effect = self.backdoor_adjustment(state, move)
+
+        if frontdoor_effect == 1 and backdoor_effect == -1:
+            move = (move + 1) % 3  # Change action to avoid obstacle while considering food
 
         final_move[move] = 1
         return final_move
