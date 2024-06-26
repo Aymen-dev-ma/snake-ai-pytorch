@@ -1,10 +1,61 @@
-# Teach AI To Play Snake! Reinforcement Learning With PyTorch and Pygame
+# Snake AI with Causal Inference
 
-In this Python Reinforcement Learning Tutorial series we teach an AI to play Snake! We build everything from scratch using Pygame and PyTorch. The tutorial consists of 4 parts:
+This project implements a Snake AI using causal inference techniques to enhance decision-making and reward shaping. The AI uses both frontdoor and backdoor adjustments to optimize its policy.
 
-You can find all tutorials on my channel: [Playlist](https://www.youtube.com/playlist?list=PLqnslRFeH2UrDh7vUmJ60YrmWd64mTTKV)
+## Overview
 
-- Part 1: I'll show you the project and teach you some basics about Reinforcement Learning and Deep Q Learning.
-- Part 2: Learn how to setup the environment and implement the Snake game.
-- Part 3: Implement the agent that controls the game.
-- Part 4: Implement the neural network to predict the moves and train it.
+The goal is to train a Snake AI that maximizes its cumulative reward by eating food and avoiding collisions. The AI incorporates causal inference to better understand the impact of its actions and adjust its behavior accordingly.
+
+## Key Components
+
+1. **Structural Causal Model (SCM)**:
+    - **Nodes**: `State_t`, `Action_t`, `FoodPlacement_t`, `Reward_t`, `State_t+1`, `Collision_t`
+    - **Edges**: Relationships between these nodes to capture causal dependencies.
+
+2. **Frontdoor Adjustment**:
+    - Used for action selection to account for the indirect effect of actions through intermediate variables.
+    - Adjusts action probabilities based on predicted future states.
+
+3. **Backdoor Adjustment**:
+    - Used for reward shaping to account for confounding variables (e.g., food placement).
+    - Adjusts rewards based on the predicted next state and potential collisions.
+
+## Code Structure
+
+- `agent.py`: Defines the Snake AI agent, including action selection and reward shaping using causal inference.
+- `model.py`: Defines the neural network model for Q-learning.
+- `game.py`: Implements the Snake game environment.
+- `scm.py`: Implements the structural causal model and causal inference techniques.
+
+## Requirements
+
+- Python 3.8+
+- PyTorch
+- NumPy
+- Matplotlib
+- NetworkX
+- Pygame
+
+## Installation
+
+Install the required packages:
+    ```sh
+    pip install -r requirements.txt
+    ```
+
+## Usage
+
+1. Train the Snake AI:
+    ```sh
+    python agent.py
+    ```
+
+2. Observe the training progress and performance metrics.
+
+## Contributing
+
+Contributions are welcome! Please open an issue or submit a pull request for any improvements or bug fixes.
+
+## License
+
+This project is licensed under the MIT License. See the `LICENSE` file for details.
